@@ -102,6 +102,9 @@ def get_consumables_by_device_type(db: Session, device_type: str):
 def get_all_consumables(db: Session):
     return db.query(Consumable).all()
 
+def get_consumable_by_id(db: Session, consumable_id: int):
+    return db.query(Consumable).filter(Consumable.id == consumable_id).first()
+
 def update_consumable_quantity(db: Session, consumable_id: int, quantity_change: int):
     consumable = db.query(Consumable).filter(Consumable.id == consumable_id).first()
     if consumable:
@@ -194,3 +197,67 @@ def calculate_repair_cost(db: Session, repair_request_id: int) -> float:
             total_consumable_cost += cost
 
     return total_service_cost + total_consumable_cost
+
+def get_completed_requests_by_date_range(db: Session, start_date: datetime, end_date: datetime):
+    """Получить завершенные заявки за период"""
+    completed_status = db.query(RequestStatus).filter(RequestStatus.name == "Выполнена").first()
+    return db.query(RepairRequest).filter(
+        and_(
+            RepairRequest.status_id == completed_status.id,
+            RepairRequest.closed_at >= start_date,
+            RepairRequest.closed_at <= end_date
+        )
+    ).all()
+
+def get_master_performance(db: Session, master_id: int):
+    """Получить статистику работы мастера"""
+    work_records = db.query(WorkRecord).filter(WorkRecord.master_id == master_id).all()
+    completed_requests = db.query(RepairRequest).join(
+        RepairRequest.masters
+    ).filter(
+        and_(
+            RepairRequest.masters.any(master_id=master_id),
+            RepairRequest.status_id == db.query(RequestStatus).filter(RequestStatus.name == "Выполнена").first().id
+        )
+    ).count()
+
+    return {
+        "work_records_count": len(work_records),
+        "completed_requests": completed_requests,
+        "total_cost": sum([calculate_repair_cost(db, r.id) for r in [wr.repair_request for wr in work_records]])
+    }
+
+def get_average_repair_time(db: Session, days: int = 30):
+    """Получить среднее время ремонта за последние N дней"""
+    from sqlalchemy import func
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    completed_status = db.query(RequestStatus).filter(RequestStatus.name == "Выполнена").first()
+
+    results = db.query(
+        func.avg(func.julianday(RepairRequest.closed_at) - func.julianday(RepairRequest.created_at)).label("avg_days")
+    ).filter(
+        and_(
+            RepairRequest.status_id == completed_status.id,
+            RepairRequest.closed_at >= start_date
+        )
+    ).first()
+
+    return results.avg_days if results and results.avg_days else 0
+
+def get_revenue_by_master(db: Session):
+    """Получить доход по мастерам"""
+    masters = db.query(Master).filter(Master.is_active == True).all()
+    revenue_data = {}
+
+    for master in masters:
+        requests = db.query(RepairRequest).join(
+            RepairRequest.masters
+        ).filter(
+            RepairRequest.masters.any(master_id=master.id)
+        ).all()
+
+        total = sum([calculate_repair_cost(db, r.id) for r in requests])
+        revenue_data[master.user.full_name] = total
+
+    return revenue_data

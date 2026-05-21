@@ -1,13 +1,14 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
-    QListWidget, QListWidgetItem, QMessageBox, QSpinBox, QComboBox, QLabel, QTextEdit
+    QListWidget, QListWidgetItem, QMessageBox, QLabel, QTextEdit
 )
 from PyQt6.QtCore import Qt
 from backend.queries import (
-    get_master_requests, get_work_records, create_work_record,
-    get_all_consumables, deduct_consumable, get_all_requests
+    get_master_requests, get_work_records, update_repair_request_status
 )
 from backend.models import RequestStatus
+from frontend.roles.dialogs.status_dialog import StatusDialog
+from frontend.roles.dialogs.work_record_dialog import WorkRecordDialog
 
 class MasterWindow(QWidget):
     def __init__(self, user, db):
@@ -15,12 +16,12 @@ class MasterWindow(QWidget):
         self.user = user
         self.db = db
         self.current_master = user.master
+        self.current_request_id = None
         self.setup_ui()
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
 
-        # Левая часть: список заявок
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Назначенные заявки:"))
 
@@ -28,7 +29,6 @@ class MasterWindow(QWidget):
         self.requests_list.itemClicked.connect(self.on_request_selected)
         left_layout.addWidget(self.requests_list)
 
-        # Правая часть: детали заявки
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("Детали заявки:"))
 
@@ -36,40 +36,24 @@ class MasterWindow(QWidget):
         self.details_text.setReadOnly(True)
         right_layout.addWidget(self.details_text)
 
-        # Таблица работ
         right_layout.addWidget(QLabel("История работ:"))
         self.work_records_table = QTableWidget()
-        self.work_records_table.setColumnCount(3)
-        self.work_records_table.setHorizontalHeaderLabels(["Дата", "Описание", ""])
+        self.work_records_table.setColumnCount(2)
+        self.work_records_table.setHorizontalHeaderLabels(["Дата", "Описание"])
         right_layout.addWidget(self.work_records_table)
 
-        # Управление запчастями
-        consumables_layout = QVBoxLayout()
-        consumables_layout.addWidget(QLabel("Запчасти:"))
-
-        self.consumables_combo = QComboBox()
-        consumables_layout.addWidget(self.consumables_combo)
-
-        qty_layout = QHBoxLayout()
-        qty_layout.addWidget(QLabel("Количество:"))
-        self.consumable_qty = QSpinBox()
-        self.consumable_qty.setMinimum(1)
-        qty_layout.addWidget(self.consumable_qty)
-        consumables_layout.addLayout(qty_layout)
-
-        add_consumable_btn = QPushButton("Добавить запчасть")
-        add_consumable_btn.clicked.connect(self.add_consumable)
-        consumables_layout.addWidget(add_consumable_btn)
-        right_layout.addLayout(consumables_layout)
-
-        # Кнопки управления статусом
-        status_layout = QHBoxLayout()
+        buttons_layout = QHBoxLayout()
+        add_work_btn = QPushButton("Добавить запись о работе")
+        add_work_btn.clicked.connect(self.add_work_record)
         change_status_btn = QPushButton("Изменить статус")
         change_status_btn.clicked.connect(self.change_request_status)
-        status_layout.addWidget(change_status_btn)
-        right_layout.addLayout(status_layout)
+        refresh_btn = QPushButton("Обновить")
+        refresh_btn.clicked.connect(self.load_assigned_requests)
+        buttons_layout.addWidget(add_work_btn)
+        buttons_layout.addWidget(change_status_btn)
+        buttons_layout.addWidget(refresh_btn)
+        right_layout.addLayout(buttons_layout)
 
-        # Общий layout
         content_layout = QHBoxLayout()
         content_layout.addLayout(left_layout, 1)
         content_layout.addLayout(right_layout, 2)
@@ -78,27 +62,37 @@ class MasterWindow(QWidget):
         self.setLayout(main_layout)
 
         self.load_assigned_requests()
-        self.load_consumables()
 
     def load_assigned_requests(self):
         self.requests_list.clear()
         requests = get_master_requests(self.db, self.current_master.id)
         for req in requests:
-            item = QListWidgetItem(f"#{req.id} - {req.client.full_name}")
+            status_color = ""
+            if req.status.name == "На выполнении":
+                status_color = " ⏳"
+            elif req.status.name == "Выполнена":
+                status_color = " ✓"
+            item = QListWidgetItem(f"#{req.id} - {req.client.full_name}{status_color}")
             item.setData(Qt.ItemDataRole.UserRole, req.id)
             self.requests_list.addItem(item)
 
     def on_request_selected(self, item):
         request_id = item.data(Qt.ItemDataRole.UserRole)
-        # Загрузить детали заявки
+        self.current_request_id = request_id
         from backend.queries import get_repair_request
         request = get_repair_request(self.db, request_id)
         if request:
             self.details_text.setText(
+                f"ID заявки: {request.id}\n"
                 f"Клиент: {request.client.full_name}\n"
-                f"Устройство: {request.device.model_name}\n"
+                f"Телефон: {request.client.phone}\n"
+                f"Устройство: {request.device.device_type} - {request.device.model_name}\n"
+                f"Серийный номер: {request.device.serial_number}\n"
                 f"Проблема: {request.problem_description}\n"
-                f"Статус: {request.status.name}"
+                f"Статус: {request.status.name}\n"
+                f"Приоритет: {request.priority.name}\n"
+                f"Тип ремонта: {request.repair_type.name}\n"
+                f"Дата создания: {request.created_at.strftime('%Y-%m-%d %H:%M')}"
             )
             self.load_work_records(request_id)
 
@@ -109,26 +103,42 @@ class MasterWindow(QWidget):
             row = self.work_records_table.rowCount()
             self.work_records_table.insertRow(row)
             self.work_records_table.setItem(row, 0, QTableWidgetItem(record.created_at.strftime("%Y-%m-%d %H:%M")))
-            self.work_records_table.setItem(row, 1, QTableWidgetItem(record.work_description))
 
-    def load_consumables(self):
-        self.consumables_combo.clear()
-        consumables = get_all_consumables(self.db)
-        for c in consumables:
-            self.consumables_combo.addItem(f"{c.name} ({c.quantity} шт)", c.id)
+            consumables_info = ""
+            if record.consumables:
+                consumables_info = " [" + ", ".join([f"{c.consumable.name}x{c.quantity_used}" for c in record.consumables]) + "]"
+
+            self.work_records_table.setItem(row, 1, QTableWidgetItem(record.work_description + consumables_info))
+
+    def add_work_record(self):
+        if not self.current_request_id:
+            QMessageBox.warning(self, "Ошибка", "Выберите заявку")
+            return
+
+        try:
+            dialog = WorkRecordDialog(self.db, self.current_master.id, self.current_request_id)
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                self.load_work_records(self.current_request_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при добавлении записи: {str(e)}")
+            print(f"Error: {e}")
 
     def change_request_status(self):
-        current_item = self.requests_list.currentItem()
-        if not current_item:
+        if not self.current_request_id:
             QMessageBox.warning(self, "Ошибка", "Выберите заявку")
             return
 
-        request_id = current_item.data(Qt.ItemDataRole.UserRole)
-        # TODO: Диалог выбора статуса
-        QMessageBox.information(self, "Информация", "Функция в разработке")
-
-    def add_consumable(self):
-        if not self.requests_list.currentItem():
-            QMessageBox.warning(self, "Ошибка", "Выберите заявку")
-            return
-        QMessageBox.information(self, "Информация", "Функция добавления запчасти в разработке")
+        try:
+            dialog = StatusDialog(self.db)
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                new_status_id = dialog.get_selected_status_id()
+                if new_status_id:
+                    update_repair_request_status(self.db, self.current_request_id, new_status_id)
+                    QMessageBox.information(self, "Успех", "Статус заявки изменен")
+                    self.load_assigned_requests()
+                    if self.requests_list.count() > 0:
+                        self.requests_list.setCurrentRow(0)
+                        self.on_request_selected(self.requests_list.item(0))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при изменении статуса: {str(e)}")
+            print(f"Error: {e}")
